@@ -1,0 +1,15 @@
+{
+  "jellyfin_url": "http://127.0.0.1:8096",
+  "api_key": "put-a-jellyfin-admin-api-key-here",
+  "database_path": "/config/data/jellyfin.db",
+  "ui_username": "admin",
+  "ui_password": "change-me",
+  "listen_host": "0.0.0.0",
+  "listen_port": 8097,
+  "sync_interval_seconds": 60,
+  "make_backups": true,
+  "security_alerts": {
+    "config_path": "/config/security-alerts.json"
+  },
+  "groups": []
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jellyfin Progress Sync</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="toolbar">
+        <div>
+          <h1>Jellyfin Progress Sync</h1>
+          <p id="statusLine">Loading configuration...</p>
+        </div>
+        <div class="actions">
+          <button id="schemaBtn" type="button">Check DB</button>
+          <button id="syncBtn" type="button">Sync Now</button>
+          <button id="saveBtn" type="button" class="primary">Save</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="settings" class="panel">
+          <h2>Connection</h2>
+          <label>
+            Jellyfin URL
+            <input name="jellyfin_url" placeholder="http://127.0.0.1:8096">
+          </label>
+          <label>
+            API key
+            <input name="api_key" type="password" autocomplete="off">
+          </label>
+          <div class="split">
+            <label>
+              UI username
+              <input name="ui_username" autocomplete="username">
+            </label>
+            <label>
+              UI password
+              <input name="ui_password" type="password" autocomplete="new-password">
+            </label>
+          </div>
+          <label>
+            SQLite database path
+            <input name="database_path" placeholder="/config/data/jellyfin.db">
+          </label>
+          <div class="split">
+            <label>
+              Sync interval
+              <input name="sync_interval_seconds" type="number" min="15" step="15">
+            </label>
+            <label class="check">
+              <input name="make_backups" type="checkbox">
+              Make backups
+            </label>
+          </div>
+        </form>
+
+        <section class="panel">
+          <div class="panelHead">
+            <h2>New Group</h2>
+            <button id="loadBtn" type="button">Load Users/Shows</button>
+          </div>
+          <label>
+            Group name
+            <input id="groupName" placeholder="AOT watch group">
+          </label>
+          <div class="chooser">
+            <div>
+              <h3>Users</h3>
+              <div id="users" class="list"></div>
+            </div>
+            <div>
+              <h3>Shows</h3>
+              <input id="seriesSearch" placeholder="Search shows">
+              <div id="series" class="list"></div>
+            </div>
+          </div>
+          <button id="addGroupBtn" type="button" class="primary wide">Add Group</button>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>Sync Groups</h2>
+        <div id="groups" class="groups"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Last Run</h2>
+        <pre id="lastRun">{}</pre>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

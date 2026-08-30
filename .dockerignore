@@ -1,0 +1,12 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+.venv/
+config.json
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+README.md
+systemd/

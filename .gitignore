@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+config.json
+progress-sync.json
+*.db
+*.sqlite
+*.sqlite3
+*.bak

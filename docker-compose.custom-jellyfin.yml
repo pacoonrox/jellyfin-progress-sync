@@ -1,0 +1,44 @@
+services:
+  jellyfin:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/jellyfin-progress-sync:latest
+    container_name: jellyfin
+    user: 568:568
+    group_add:
+      - "107"
+    ports:
+      - "8096:8096"
+      - "8097:8097"
+    environment:
+      - JELLYFIN_PublishedServerUrl=https://drdave.uk
+      - LIBVA_DRIVER_NAME=radeonsi
+      - PROGRESS_SYNC_CONFIG=/config/progress-sync.json
+    volumes:
+      - jellyfin_transcode:/transcode
+      - /mnt/pool/nas/jellyfin/config:/config
+      - /mnt/pool/nas/jellyfin/cache:/cache
+      - /mnt/pool/nas/Plex:/Fake
+      - /mnt/pool/nas/Media:/Media
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card0:/dev/dri/card0
+    restart: unless-stopped
+
+  jellyfin-transcode-cleaner:
+    image: alpine:latest
+    container_name: jellyfin_transcode_cleaner
+    volumes:
+      - jellyfin_transcode:/transcode
+    command: >
+      sh -c "while true; do
+        find /transcode -type f -mmin +30 -delete;
+        find /transcode -type d -empty -delete;
+        sleep 300;
+      done"
+    restart: unless-stopped
+
+volumes:
+  jellyfin_transcode:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=32g,mode=1777

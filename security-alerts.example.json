@@ -1,0 +1,34 @@
+{
+  "enabled": true,
+  "database_path": "/config/data/jellyfin.db",
+  "state_path": "/config/security-agent-state.json",
+  "poll_interval_seconds": 15,
+  "startup_lookback_minutes": 5,
+  "alert_types": [
+    "AuthenticationFailed",
+    "UserLockedOut"
+  ],
+  "discord": {
+    "webhook_url": "",
+    "username": "Jellyfin Security",
+    "avatar_url": ""
+  },
+  "thresholds": {
+    "failures": 5,
+    "window_seconds": 600
+  },
+  "ban": {
+    "enabled": false,
+    "action": "cloudflare",
+    "duration_seconds": 86400,
+    "allowlist": [
+      "127.0.0.1",
+      "::1"
+    ],
+    "cloudflare": {
+      "api_token": "",
+      "account_id": "",
+      "list_id": ""
+    }
+  }
+}
