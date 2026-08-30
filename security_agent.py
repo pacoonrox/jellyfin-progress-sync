@@ -22,6 +22,11 @@ LOG = logging.getLogger("jellyfin-security-agent")
 IP_RE = re.compile(
     r"(?P<ip>(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4})"
 )
+DENIED_LOG_RE = re.compile(
+    r"Authentication request for (?P<username>.+?) has been denied \(IP: (?P<ip>[^)]+)\)\.",
+    re.IGNORECASE,
+)
+LOG_TS_RE = re.compile(r"^\[(?P<time>\d{2}:\d{2}:\d{2})\]")
 
 
 def utc_now() -> str:
@@ -50,6 +55,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "database_path": "/config/data/jellyfin.db",
+    "log_paths": ["/config/log"],
     "state_path": "/config/security-agent-state.json",
     "poll_interval_seconds": 15,
     "startup_lookback_minutes": 5,
@@ -89,6 +95,7 @@ class Activity:
     user_id: str
     item_id: str
     severity: int | None
+    source: str = "activity-log"
 
     @property
     def username(self) -> str:
@@ -129,6 +136,7 @@ def load_config(path: Path) -> dict[str, Any]:
 def load_state(path: Path) -> dict[str, Any]:
     state = load_json(path)
     state.setdefault("last_id", 0)
+    state.setdefault("log_offsets", {})
     state.setdefault("bans", {})
     return state
 
@@ -222,6 +230,65 @@ def activity_rows(db_path: Path, after_id: int) -> list[Activity]:
         )
         for row in rows
     ]
+
+
+def iter_log_files(paths: list[str]) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            files.extend(sorted(path.glob("*.log")))
+        elif path.exists():
+            files.append(path)
+    return sorted(set(files), key=lambda p: str(p))
+
+
+def log_activity(path: Path, line_number: int, line: str) -> Activity | None:
+    match = DENIED_LOG_RE.search(line)
+    if not match:
+        return None
+    ip = match.group("ip").strip()
+    username = match.group("username").strip()
+    timestamp = parse_dt(None)
+    ts_match = LOG_TS_RE.search(line)
+    if ts_match:
+        now = datetime.now(timezone.utc)
+        hour, minute, second = [int(part) for part in ts_match.group("time").split(":")]
+        timestamp = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    return Activity(
+        id=line_number,
+        date=timestamp,
+        type="AuthenticationFailed",
+        name=f"Failed login attempt from {username}",
+        short_overview=f"IP address: {ip}",
+        overview=line.strip(),
+        user_id="",
+        item_id=str(path),
+        severity=4,
+        source="jellyfin-log",
+    )
+
+
+def log_rows(paths: list[str], state: dict[str, Any]) -> list[Activity]:
+    offsets: dict[str, int] = state.setdefault("log_offsets", {})
+    rows: list[Activity] = []
+    for path in iter_log_files(paths):
+        key = str(path)
+        size = path.stat().st_size
+        if key not in offsets:
+            offsets[key] = size
+            continue
+        offset = int(offsets.get(key) or 0)
+        if size < offset:
+            offset = 0
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            for line_number, line in enumerate(handle, start=1):
+                activity = log_activity(path, line_number, line)
+                if activity is not None:
+                    rows.append(activity)
+            offsets[key] = handle.tell()
+    return rows
 
 
 def initialize_last_id(db_path: Path, lookback_minutes: int) -> int:
@@ -331,8 +398,15 @@ class SecurityAgent:
             save_state(state_path, state)
 
         alert_types = set(cfg.get("alert_types") or [])
+        use_logs_for_auth_failures = bool(cfg.get("log_paths"))
         for activity in activity_rows(db_path, int(state.get("last_id") or 0)):
             state["last_id"] = max(int(state.get("last_id") or 0), activity.id)
+            if activity.type not in alert_types:
+                continue
+            if use_logs_for_auth_failures and activity.type == "AuthenticationFailed":
+                continue
+            self.handle_activity(cfg, state, activity)
+        for activity in log_rows(list(cfg.get("log_paths") or []), state):
             if activity.type not in alert_types:
                 continue
             self.handle_activity(cfg, state, activity)
@@ -347,7 +421,7 @@ class SecurityAgent:
                 activity,
                 "Jellyfin Failed Login",
                 0xD83A34,
-                {"Failures In Window": str(count)},
+                {"Failures In Window": str(count), "Source": activity.source},
             )
             if self.should_ban(cfg, state, ip, count):
                 self.ban(cfg, state, activity, ip, f"{count} failed Jellyfin logins")

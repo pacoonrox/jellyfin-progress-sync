@@ -1,6 +1,9 @@
 {
   "enabled": true,
   "database_path": "/config/data/jellyfin.db",
+  "log_paths": [
+    "/config/log"
+  ],
   "state_path": "/config/security-agent-state.json",
   "poll_interval_seconds": 15,
   "startup_lookback_minutes": 5,
