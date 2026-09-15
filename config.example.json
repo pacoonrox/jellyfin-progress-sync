@@ -6,6 +6,8 @@
   "ui_password": "change-me",
   "listen_host": "0.0.0.0",
   "listen_port": 8097,
+  "community_enabled": true,
+  "community_db_path": "/config/data/community.db",
   "sync_interval_seconds": 60,
   "make_backups": true,
   "security_alerts": {

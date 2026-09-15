@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Community · Jellyfin</title>
+    <link rel="stylesheet" href="/community/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a id="backLink" class="brand" href="#">Gooners</a>
+      <div>
+        <h1>Community</h1>
+        <p>Rate, discuss, and discover what your server is watching.</p>
+      </div>
+    </header>
+
+    <main class="page">
+      <div id="notice" class="notice" hidden></div>
+      <section id="itemPanel" class="panel itemPanel" hidden></section>
+
+      <div class="layout">
+        <section class="panel rankings">
+          <div class="sectionHead">
+            <div>
+              <h2>Community rankings</h2>
+              <p>Ratings are from people on this Jellyfin server.</p>
+            </div>
+            <div class="filters">
+              <select id="sortSelect" aria-label="Sort rankings">
+                <option value="top">Top rated</option>
+                <option value="recent">Recently discussed</option>
+                <option value="discussed">Most discussed</option>
+              </select>
+              <select id="typeSelect" aria-label="Filter by media type">
+                <option value="">Everything</option>
+                <option value="Movie">Movies</option>
+                <option value="Series">Shows</option>
+                <option value="Episode">Episodes</option>
+              </select>
+            </div>
+          </div>
+          <div id="rankingList" class="rankingList"><div class="loading">Loading rankings…</div></div>
+        </section>
+
+        <section class="panel chatPanel">
+          <div class="sectionHead">
+            <div>
+              <h2>Server chat</h2>
+              <p>A small room for everyone on this server.</p>
+            </div>
+            <span class="liveDot">● live</span>
+          </div>
+          <div id="chatList" class="chatList"><div class="loading">Loading chat…</div></div>
+          <form id="chatForm" class="composer">
+            <input id="chatInput" maxlength="500" autocomplete="off" placeholder="Say something…" required>
+            <button type="submit">Send</button>
+          </form>
+        </section>
+      </div>
+    </main>
+    <script src="/community/app.js"></script>
+  </body>
+</html>

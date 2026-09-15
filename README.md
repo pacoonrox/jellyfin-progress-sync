@@ -6,6 +6,32 @@ This is not a separate sidecar container. The image extends the official `jellyf
 
 The UI uses the local Jellyfin API to list users and shows, then the sync loop writes selected episode progress into Jellyfin's SQLite `UserDatas` table.
 
+## Community Ratings, Comments, And Chat
+
+The image includes an optional Community feature. It adds a Community button after
+the visible library buttons in Jellyfin Web, a right-click `Rate & discuss` action
+on media cards, per-user 1–10 ratings, comments on movies/shows/episodes, server
+rankings, and a small server chat room.
+
+Community data is stored in a separate SQLite database and never modifies
+Jellyfin's `jellyfin.db` or `UserDatas` table:
+
+```text
+/config/data/community.db
+```
+
+The Community page receives the current Jellyfin session token in the URL
+fragment, validates it against Jellyfin, and then removes it from the address bar.
+No Jellyfin password or admin API key is stored in community records. The
+`community_enabled` setting can be set to `false` in `progress-sync.json` to
+disable the feature.
+
+The image exposes the Community service on port `8097`, which must be reachable
+from users' browsers. If Jellyfin is behind a reverse proxy, proxy this port as
+well (for example, `community.example.com` -> container port `8097`) and adjust
+the generated web plugin URL if your deployment does not expose port 8097 on the
+same hostname.
+
 ## Safety Notes
 
 - Stop Jellyfin or take a config backup before first use.
