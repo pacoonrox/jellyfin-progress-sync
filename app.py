@@ -18,8 +18,6 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from community import CommunityStore
-
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -52,8 +50,6 @@ class ConfigStore:
         data.setdefault("ui_password", "change-me")
         data.setdefault("sync_interval_seconds", 60)
         data.setdefault("make_backups", True)
-        data.setdefault("community_enabled", True)
-        data.setdefault("community_db_path", "/config/data/community.db")
         data.setdefault("groups", [])
         return cls(path=path, data=data, lock=threading.RLock())
 
@@ -70,9 +66,9 @@ class ConfigStore:
 
 
 class JellyfinClient:
-    def __init__(self, cfg: dict[str, Any], token: str | None = None):
+    def __init__(self, cfg: dict[str, Any]):
         self.base = str(cfg.get("jellyfin_url", "")).rstrip("/")
-        self.api_key = token or str(cfg.get("api_key", ""))
+        self.api_key = str(cfg.get("api_key", ""))
         if not self.base or not self.api_key:
             raise ValueError("jellyfin_url and api_key must be set")
 
@@ -85,16 +81,6 @@ class JellyfinClient:
         )
         res.raise_for_status()
         return res.json()
-
-    def current_user(self) -> dict[str, Any]:
-        return self.get("/Users/Me")
-
-    def item(self, item_id: str, user_id: str) -> dict[str, Any]:
-        return self.get(
-            f"/Items/{item_id}",
-            userId=user_id,
-            fields="ProviderIds,ProductionYear,SeriesName",
-        )
 
     def users(self) -> list[dict[str, Any]]:
         return self.get("/Users", isDisabled="false", isHidden="false")
@@ -367,52 +353,13 @@ def json_response(handler: SimpleHTTPRequestHandler, data: Any, status: int = 20
 class Handler(SimpleHTTPRequestHandler):
     store: ConfigStore
     engine: SyncEngine
-    community: CommunityStore
 
     def translate_path(self, path: str) -> str:
         parsed = urlparse(path)
         req = parsed.path
         if req == "/":
             req = "/index.html"
-        elif req in {"/community", "/community/"}:
-            req = "/community/index.html"
         return str(STATIC / req.lstrip("/"))
-
-    def community_path(self) -> bool:
-        return self.path.split("?", 1)[0].startswith("/api/community")
-
-    def community_static_path(self) -> bool:
-        return self.path.split("?", 1)[0].startswith("/community")
-
-    def send_cors_headers(self) -> None:
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Emby-Token, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-
-    def community_identity(self) -> dict[str, Any]:
-        if not self.store.snapshot().get("community_enabled", True):
-            raise PermissionError("community is disabled")
-        token = self.headers.get("X-Emby-Token", "")
-        if not token:
-            authorization = self.headers.get("Authorization", "")
-            if authorization.lower().startswith("bearer "):
-                token = authorization[7:].strip()
-        if not token:
-            raise PermissionError("a Jellyfin session token is required")
-        user = JellyfinClient(self.store.snapshot(), token=token).current_user()
-        return {"id": str(user["Id"]), "name": str(user.get("Name") or user["Id"]), "admin": bool(user.get("Policy", {}).get("IsAdministrator")), "token": token}
-
-    def send_community_json(self, data: Any, status: int = 200) -> None:
-        body = json.dumps(data, indent=2).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_cors_headers()
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
     def authenticated(self) -> bool:
         cfg = self.store.snapshot()
@@ -438,45 +385,7 @@ class Handler(SimpleHTTPRequestHandler):
         return False
 
     def do_GET(self) -> None:
-        if self.community_path():
-            try:
-                identity = self.community_identity()
-                parsed = urlparse(self.path)
-                qs = parse_qs(parsed.query)
-                if parsed.path == "/api/community/item":
-                    item_id = qs.get("itemId", [""])[0]
-                    item = JellyfinClient(self.store.snapshot(), token=identity["token"]).item(item_id, identity["id"])
-                    if item.get("Type") not in {"Movie", "Series", "Episode"}:
-                        raise ValueError("only movies, shows, and episodes can be discussed")
-                    self.community.save_media_item(item)
-                    result = self.community.item(item_id, identity["id"])
-                    self.send_community_json(result or {}, 200)
-                elif parsed.path == "/api/community/feed":
-                    item_type = qs.get("type", [None])[0]
-                    sort = qs.get("sort", ["top"])[0]
-                    rows = self.community.feed(sort, item_type, identity["id"], int(qs.get("limit", [24])[0]))
-                    visible = []
-                    client = JellyfinClient(self.store.snapshot(), token=identity["token"])
-                    for row in rows:
-                        try:
-                            client.item(row["item"]["id"], identity["id"])
-                            visible.append(row)
-                        except requests.RequestException:
-                            continue
-                    self.send_community_json(visible)
-                elif parsed.path == "/api/community/chat":
-                    self.send_community_json(self.community.chat(qs.get("since", [None])[0]))
-                elif parsed.path == "/api/community/health":
-                    self.send_community_json({"ok": True, "userId": identity["id"]})
-                else:
-                    self.send_community_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-            except PermissionError as exc:
-                self.send_community_json({"error": str(exc)}, HTTPStatus.UNAUTHORIZED)
-            except Exception as exc:
-                LOG.exception("community GET failed")
-                self.send_community_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-            return
-        if not self.community_static_path() and not self.require_auth():
+        if not self.require_auth():
             return
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
@@ -507,36 +416,6 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
     def do_POST(self) -> None:
-        if self.community_path():
-            try:
-                identity = self.community_identity()
-                parsed = urlparse(self.path)
-                length = min(int(self.headers.get("Content-Length", "0")), 100_000)
-                payload = json.loads(self.rfile.read(length).decode() or "{}")
-                if parsed.path.startswith("/api/community/item/") and parsed.path.endswith("/comments"):
-                    item_id = parsed.path.split("/")[4]
-                    item = JellyfinClient(self.store.snapshot(), token=identity["token"]).item(item_id, identity["id"])
-                    if item.get("Type") not in {"Movie", "Series", "Episode"}:
-                        raise ValueError("only movies, shows, and episodes can be discussed")
-                    self.community.save_media_item(item)
-                    result = self.community.add_comment(item_id, identity["id"], identity["name"], str(payload.get("body", "")))
-                    self.send_community_json(result, HTTPStatus.CREATED)
-                elif parsed.path == "/api/community/chat":
-                    self.send_community_json(self.community.add_chat(identity["id"], identity["name"], str(payload.get("body", ""))), HTTPStatus.CREATED)
-                elif parsed.path.startswith("/api/community/report"):
-                    target_type = str(payload.get("targetType", ""))
-                    if target_type not in {"comment", "chat"}:
-                        raise ValueError("invalid report target")
-                    self.community.report(identity["id"], target_type, str(payload.get("targetId", "")), str(payload.get("reason", "Reported by user")))
-                    self.send_community_json({"ok": True}, HTTPStatus.CREATED)
-                else:
-                    self.send_community_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-            except PermissionError as exc:
-                self.send_community_json({"error": str(exc)}, HTTPStatus.UNAUTHORIZED)
-            except Exception as exc:
-                LOG.exception("community POST failed")
-                self.send_community_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-            return
         if not self.require_auth():
             return
         parsed = urlparse(self.path)
@@ -558,65 +437,6 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
-    def do_PUT(self) -> None:
-        if not self.community_path():
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            identity = self.community_identity()
-            parsed = urlparse(self.path)
-            length = min(int(self.headers.get("Content-Length", "0")), 10_000)
-            payload = json.loads(self.rfile.read(length).decode() or "{}")
-            if parsed.path.startswith("/api/community/item/") and parsed.path.endswith("/rating"):
-                item_id = parsed.path.split("/")[4]
-                rating = payload.get("rating")
-                rating = None if rating in (None, "") else int(rating)
-                if rating is not None and not 1 <= rating <= 10:
-                    raise ValueError("rating must be between 1 and 10")
-                client = JellyfinClient(self.store.snapshot(), token=identity["token"])
-                item = client.item(item_id, identity["id"])
-                if item.get("Type") not in {"Movie", "Series", "Episode"}:
-                    raise ValueError("only movies, shows, and episodes can be rated")
-                self.community.save_media_item(item)
-                self.community.upsert_rating(item_id, identity["id"], identity["name"], rating)
-                self.send_community_json(self.community.item(item_id, identity["id"]))
-            else:
-                self.send_community_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-        except PermissionError as exc:
-            self.send_community_json({"error": str(exc)}, HTTPStatus.UNAUTHORIZED)
-        except Exception as exc:
-            LOG.exception("community PUT failed")
-            self.send_community_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-
-    def do_DELETE(self) -> None:
-        if not self.community_path():
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            identity = self.community_identity()
-            parsed = urlparse(self.path)
-            if parsed.path.startswith("/api/community/comments/"):
-                deleted = self.community.delete_comment(parsed.path.rsplit("/", 1)[-1], identity["id"], identity["admin"])
-            elif parsed.path.startswith("/api/community/chat/"):
-                deleted = self.community.delete_chat(parsed.path.rsplit("/", 1)[-1], identity["id"], identity["admin"])
-            else:
-                self.send_community_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-                return
-            self.send_community_json({"ok": deleted}, HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
-        except PermissionError as exc:
-            self.send_community_json({"error": str(exc)}, HTTPStatus.UNAUTHORIZED)
-        except Exception as exc:
-            LOG.exception("community DELETE failed")
-            self.send_community_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-
-    def do_OPTIONS(self) -> None:
-        if self.community_path():
-            self.send_response(HTTPStatus.NO_CONTENT)
-            self.send_cors_headers()
-            self.end_headers()
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -626,8 +446,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     store = ConfigStore.load(Path(args.config))
     engine = SyncEngine(store)
-    cfg = store.snapshot()
-    Handler.community = CommunityStore(str(cfg.get("community_db_path", "/config/data/community.db")))
     Handler.store = store
     Handler.engine = engine
 
