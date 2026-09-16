@@ -9,16 +9,31 @@
   "startup_lookback_minutes": 5,
   "alert_types": [
     "AuthenticationFailed",
-    "UserLockedOut"
+    "UserLockedOut",
+    "TwoFactorAuthenticationFailed",
+    "QuickConnectPortalEntered"
   ],
   "discord": {
     "webhook_url": "",
     "username": "Jellyfin Security",
-    "avatar_url": ""
+    "avatar_url": "",
+    "mention": "@dakxp"
   },
   "thresholds": {
     "failures": 5,
     "window_seconds": 600
+  },
+  "proxy": {
+    "trust_headers": false,
+    "trusted_proxies": [],
+    "header_names": [
+      "CF-Connecting-IP",
+      "CF-Connecting-IPv6",
+      "True-Client-IP",
+      "X-Forwarded-For",
+      "X-Real-IP",
+      "Forwarded"
+    ]
   },
   "ban": {
     "enabled": false,
