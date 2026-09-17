@@ -10,8 +10,7 @@
   "alert_types": [
     "AuthenticationFailed",
     "UserLockedOut",
-    "TwoFactorAuthenticationFailed",
-    "QuickConnectPortalEntered"
+    "TwoFactorAuthenticationFailed"
   ],
   "discord": {
     "webhook_url": "",

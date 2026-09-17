@@ -64,7 +64,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "AuthenticationFailed",
         "UserLockedOut",
         "TwoFactorAuthenticationFailed",
-        "QuickConnectPortalEntered",
     ],
     "discord": {
         "webhook_url": "",
@@ -663,14 +662,6 @@ class SecurityAgent:
             if self.should_ban(cfg, state, ip, count):
                 self.ban(cfg, state, activity, ip, f"{count} failed Jellyfin 2FA attempts")
             return
-
-        if activity.type == "QuickConnectPortalEntered":
-            ip = client_ip_for_activity(cfg, activity)
-            extra = {"Source": activity.source}
-            request_host = extract_request_host(" ".join([activity.short_overview, activity.overview]))
-            if request_host:
-                extra["Domain"] = request_host
-            send_discord(cfg, activity, "Jellyfin Quick Connect Portal Entered", 0x2563EB, extra, display_ip=ip)
 
     def record_failure(self, cfg: dict[str, Any], ip: str) -> int:
         if not ip:
