@@ -14,6 +14,7 @@ from typing import Any
 import discord
 import requests
 from discord import app_commands
+from discord.ext import tasks
 
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger("jellyfin-discord-bot")
@@ -206,6 +207,81 @@ class QueuePickerView(discord.ui.View):
         self.stop()
 
 
+class UserQuickConnectModal(discord.ui.Modal, title="Enter Quick Connect Code"):
+    code: discord.ui.TextInput = discord.ui.TextInput(label="6-digit code", placeholder="123456", min_length=6, max_length=6)
+
+    def __init__(self, jellyfin: JellyfinAdminClient, jellyfin_user_id: str, jellyfin_username: str):
+        super().__init__()
+        self.jellyfin = jellyfin
+        self.jellyfin_user_id = jellyfin_user_id
+        self.jellyfin_username = jellyfin_username
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            ok = await asyncio.to_thread(self.jellyfin.quick_connect_authorize, self.code.value.strip(), self.jellyfin_user_id)
+        except Exception as exc:
+            await interaction.followup.send(f"Jellyfin rejected that: {exc}", ephemeral=True)
+            return
+        if ok:
+            await interaction.followup.send(f"Signed in as **{self.jellyfin_username}**.", ephemeral=True)
+        else:
+            await interaction.followup.send("That code wasn't accepted. It may be wrong or expired.", ephemeral=True)
+
+
+class AdminQuickConnectModal(discord.ui.Modal, title="Admin: Enter Quick Connect Code"):
+    jellyfin_username: discord.ui.TextInput = discord.ui.TextInput(label="Jellyfin username", placeholder="exact username")
+    code: discord.ui.TextInput = discord.ui.TextInput(label="6-digit code", placeholder="123456", min_length=6, max_length=6)
+
+    def __init__(self, jellyfin: JellyfinAdminClient):
+        super().__init__()
+        self.jellyfin = jellyfin
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            user = await asyncio.to_thread(self.jellyfin.find_user, self.jellyfin_username.value)
+            if user is None:
+                await interaction.followup.send(f"No Jellyfin user named `{self.jellyfin_username.value}`.", ephemeral=True)
+                return
+            ok = await asyncio.to_thread(self.jellyfin.quick_connect_authorize, self.code.value.strip(), user["Id"])
+        except Exception as exc:
+            await interaction.followup.send(f"Jellyfin rejected that: {exc}", ephemeral=True)
+            return
+        if ok:
+            await interaction.followup.send(f"Signed the device in as **{user['Name']}**.", ephemeral=True)
+        else:
+            await interaction.followup.send("That code wasn't accepted.", ephemeral=True)
+
+
+class QuickConnectButtonView(discord.ui.View):
+    """A standing button, persistent across bot restarts (fixed custom_id + timeout=None).
+
+    Which modal it opens depends on the channel it's clicked in: the admin
+    channel gets a username field too, any linked user channel is locked to
+    that channel's own account.
+    """
+
+    def __init__(self, bot: "SignOnBot"):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Enter Quick Connect Code", style=discord.ButtonStyle.primary, custom_id="jellyfin:quickconnect-button")
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cfg = self.bot.store.snapshot()
+        admin_channel_id = cfg["discord"].get("admin_channel_id")
+        if admin_channel_id and interaction.channel_id == int(admin_channel_id):
+            await interaction.response.send_modal(AdminQuickConnectModal(self.bot.jellyfin))
+            return
+        mapping = find_mapping_by_channel(self.bot.store, interaction.channel_id)
+        if mapping is None:
+            await interaction.response.send_message("This channel isn't linked to a Jellyfin account.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            UserQuickConnectModal(self.bot.jellyfin, mapping["jellyfin_user_id"], mapping["jellyfin_username"])
+        )
+
+
 class SignOnBot(discord.Client):
     def __init__(self, store: BotConfigStore):
         super().__init__(intents=discord.Intents.default())
@@ -213,6 +289,7 @@ class SignOnBot(discord.Client):
         self.store = store
         cfg = store.snapshot()
         self.jellyfin = JellyfinAdminClient(cfg["jellyfin"]["base_url"], cfg["jellyfin"]["api_key"])
+        self.announced_requests: set[str] = set()
 
     async def setup_hook(self) -> None:
         guild_id = self.store.snapshot()["discord"].get("guild_id")
@@ -222,9 +299,52 @@ class SignOnBot(discord.Client):
             await self.tree.sync(guild=guild_obj)
         else:
             await self.tree.sync()
+        self.add_view(QuickConnectButtonView(self))
+        self.watch_portal_queue.start()
 
     async def on_ready(self) -> None:
         LOG.info("Logged in as %s", self.user)
+
+    @tasks.loop(seconds=5)
+    async def watch_portal_queue(self) -> None:
+        try:
+            queue = await asyncio.to_thread(self.jellyfin.queue)
+        except Exception:
+            return
+        current_ids = {entry["Id"] for entry in queue}
+        new_ids = current_ids - self.announced_requests
+        self.announced_requests = current_ids
+        if not new_ids:
+            return
+
+        cfg = self.store.snapshot()
+        channel_ids = {int(u["channel_id"]) for u in cfg["users"].values() if u.get("channel_id")}
+        admin_channel_id = cfg["discord"].get("admin_channel_id")
+        if admin_channel_id:
+            channel_ids.add(int(admin_channel_id))
+        if not channel_ids:
+            return
+
+        for entry in queue:
+            if entry["Id"] not in new_ids:
+                continue
+            message = (
+                f"A device is waiting to sign in: **{entry.get('DeviceName') or 'Unknown device'}** "
+                f"({entry.get('AppName', '?')} on {entry.get('Platform', '?')}). Approve it within 5 minutes "
+                f"with `/signin-queue` (your own account) or `/admin-queue` (admin channel, any account)."
+            )
+            for channel_id in channel_ids:
+                channel = self.get_channel(channel_id)
+                if channel is None:
+                    continue
+                try:
+                    await channel.send(message)
+                except discord.Forbidden:
+                    LOG.warning("Missing permission to post the portal-queue notice in channel %s", channel_id)
+
+    @watch_portal_queue.before_loop
+    async def before_watch_portal_queue(self) -> None:
+        await self.wait_until_ready()
 
 
 def build_bot(store: BotConfigStore) -> SignOnBot:
@@ -320,8 +440,9 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
 
         await channel.send(
             f"{member.mention} this channel is linked to the Jellyfin account **{user['Name']}**.\n"
-            f"Use `/signin code:XXXXXX` for a device showing a Quick Connect code, "
-            f"or `/signin-queue` to approve a device waiting in the Quick Sign-On queue."
+            f"Use the button below (or `/signin code:XXXXXX`) for a device showing a Quick Connect code, "
+            f"or `/signin-queue` to approve a device waiting in the Quick Sign-On queue.",
+            view=QuickConnectButtonView(bot),
         )
         await interaction.followup.send(f"Linked {member.mention} to `{user['Name']}` in {channel.mention}.", ephemeral=True)
 
@@ -376,6 +497,12 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         cfg = store.snapshot()
         cfg["discord"]["admin_channel_id"] = str(channel.id)
         store.save(cfg)
+        await channel.send(
+            "This is the admin sign-on channel. Use the button below (or `/admin-signin`) for a device showing "
+            "a Quick Connect code, or `/admin-queue` to approve a device waiting in the Quick Sign-On queue — "
+            "both let you pick any Jellyfin account.",
+            view=QuickConnectButtonView(bot),
+        )
         await interaction.response.send_message(f"{channel.mention} is now the admin channel.", ephemeral=True)
 
     @tree.command(name="lockdown-server", description="Admin: hide every channel from @everyone by default until a member is linked.")
