@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 config.json
 progress-sync.json
+discord-bot.json
 *.db
 *.sqlite
 *.sqlite3

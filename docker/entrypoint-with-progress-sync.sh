@@ -3,12 +3,16 @@ set -eu
 
 PROGRESS_SYNC_CONFIG="${PROGRESS_SYNC_CONFIG:-/config/progress-sync.json}"
 SECURITY_ALERTS_CONFIG="${SECURITY_ALERTS_CONFIG:-/config/security-alerts.json}"
+DISCORD_BOT_CONFIG="${DISCORD_BOT_CONFIG:-/config/discord-bot.json}"
 
 python3 /opt/progress-sync/app.py --config "$PROGRESS_SYNC_CONFIG" &
 PROGRESS_SYNC_PID="$!"
 
 python3 /opt/progress-sync/security_agent.py --config "$SECURITY_ALERTS_CONFIG" &
 SECURITY_AGENT_PID="$!"
+
+python3 /opt/progress-sync/discord_bot.py --config "$DISCORD_BOT_CONFIG" &
+DISCORD_BOT_PID="$!"
 
 /jellyfin/jellyfin "$@" &
 JELLYFIN_PID="$!"
@@ -22,6 +26,9 @@ cleanup() {
     fi
     if kill -0 "$SECURITY_AGENT_PID" 2>/dev/null; then
         kill "$SECURITY_AGENT_PID" 2>/dev/null || true
+    fi
+    if kill -0 "$DISCORD_BOT_PID" 2>/dev/null; then
+        kill "$DISCORD_BOT_PID" 2>/dev/null || true
     fi
 }
 

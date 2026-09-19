@@ -1,0 +1,13 @@
+{
+  "discord": {
+    "bot_token": "put-a-discord-bot-token-here",
+    "guild_id": "put-your-discord-server-id-here",
+    "admin_channel_id": null,
+    "category_id": null
+  },
+  "jellyfin": {
+    "base_url": "http://127.0.0.1:8096",
+    "api_key": "put-a-jellyfin-admin-api-key-here"
+  },
+  "users": {}
+}
