@@ -1,5 +1,6 @@
+ARG JELLYFIN_BASE_IMAGE=ghcr.io/pacoonrox/jellyfin-server-progress-sync
 ARG JELLYFIN_BASE_TAG=latest
-FROM jellyfin/jellyfin:${JELLYFIN_BASE_TAG}
+FROM ${JELLYFIN_BASE_IMAGE}:${JELLYFIN_BASE_TAG}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -9,18 +10,23 @@ USER root
 RUN apt-get update \
     && apt-get install --no-install-recommends --no-install-suggests --yes \
         python3 \
-        python3-requests \
+        python3-pip \
     && apt-get clean autoclean --yes \
     && apt-get autoremove --yes \
     && rm -rf /var/cache/apt/archives* /var/lib/apt/lists/*
 
 WORKDIR /opt/progress-sync
 
+COPY requirements.txt ./requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+
 COPY app.py ./app.py
 COPY security_agent.py ./security_agent.py
+COPY discord_bot.py ./discord_bot.py
 COPY static ./static
 COPY config.example.json ./config.example.json
 COPY security-alerts.example.json ./security-alerts.example.json
+COPY discord-bot.example.json ./discord-bot.example.json
 COPY docker/entrypoint-with-progress-sync.sh /entrypoint-with-progress-sync.sh
 
 RUN chmod 755 /entrypoint-with-progress-sync.sh
