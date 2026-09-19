@@ -300,7 +300,16 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         existing = cfg["users"].get(str(member.id))
         channel = guild.get_channel(int(existing["channel_id"])) if existing and existing.get("channel_id") else None
         if not isinstance(channel, discord.TextChannel):
-            channel = await create_user_channel(guild, member, category)
+            try:
+                channel = await create_user_channel(guild, member, category)
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "I don't have permission to create a channel here — check that I have Manage Channels "
+                    "and Manage Roles, and that the configured category (if any) doesn't have overwrites "
+                    "excluding me.",
+                    ephemeral=True,
+                )
+                return
 
         cfg["users"][str(member.id)] = {
             "jellyfin_user_id": user["Id"],
@@ -352,8 +361,18 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         if guild is None or not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("Run this inside a text channel.", ephemeral=True)
             return
-        await channel.set_permissions(guild.default_role, view_channel=False)
-        await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        try:
+            await channel.set_permissions(guild.default_role, view_channel=False)
+            await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"I don't have permission to manage {channel.mention}'s access — it likely has permission "
+                f"overwrites from before I was invited that don't grant me Manage Permissions here. "
+                f"Try a brand-new channel instead, or add me to this channel's permissions with Manage "
+                f"Roles/Manage Channels allowed.",
+                ephemeral=True,
+            )
+            return
         cfg = store.snapshot()
         cfg["discord"]["admin_channel_id"] = str(channel.id)
         store.save(cfg)
