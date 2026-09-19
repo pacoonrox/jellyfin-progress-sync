@@ -167,26 +167,24 @@ def is_owner(interaction: discord.Interaction) -> bool:
     return interaction.guild is not None and interaction.guild.owner_id == interaction.user.id
 
 
-def format_portal_telemetry(entry: dict[str, Any]) -> str:
+def format_portal_telemetry(entry: dict[str, Any], *, include_ip: bool = False) -> str:
     """Mirrors the fields and layout of the deviceApprovalCard on the actual
     Quick Sign-On web page (quickConnect/index.tsx): device name, client,
-    platform, connection domain, entered/expires timestamps.
-
-    The requesting IP is deliberately never included here, even for the
-    admin channel — it's only ever revealed ephemerally to a verified owner
-    via AdminPortalRequestView's "Show requesting IP" button, not posted as
-    static message content that anyone with channel access could read.
+    platform, connection domain, entered/expires timestamps, and — only for
+    the admin channel, same restriction as the website's isAdministrator
+    check — the requesting IP.
     """
-    return "\n".join(
-        [
-            f"**{entry.get('DeviceName') or 'Unknown device'}**",
-            f"Client: {entry.get('AppName', '?')} {entry.get('AppVersion', '')}".rstrip(),
-            f"Platform: {entry.get('Platform') or 'Unknown'} {entry.get('OsVersion', '')}".rstrip(),
-            f"Connection domain: {entry.get('ConnectionDomain') or 'Unknown'}",
-            f"Entered queue: {to_discord_timestamp(entry.get('CreatedUtc'))}",
-            f"Expires: {to_discord_timestamp(entry.get('ExpiresUtc'))}",
-        ]
-    )
+    lines = [
+        f"**{entry.get('DeviceName') or 'Unknown device'}**",
+        f"Client: {entry.get('AppName', '?')} {entry.get('AppVersion', '')}".rstrip(),
+        f"Platform: {entry.get('Platform') or 'Unknown'} {entry.get('OsVersion', '')}".rstrip(),
+        f"Connection domain: {entry.get('ConnectionDomain') or 'Unknown'}",
+        f"Entered queue: {to_discord_timestamp(entry.get('CreatedUtc'))}",
+        f"Expires: {to_discord_timestamp(entry.get('ExpiresUtc'))}",
+    ]
+    if include_ip:
+        lines.append(f"Requesting IP: {entry.get('RequestingIpAddress') or 'Unknown'}")
+    return "\n".join(lines)
 
 
 async def create_user_channel(
@@ -310,61 +308,54 @@ class UserPortalRequestView(_PortalRequestView):
         await self._finish(f"Marked \"not this device\" by {interaction.user.mention}.")
 
 
-class AdminApproveModal(discord.ui.Modal, title="Approve for which user?"):
-    jellyfin_username: discord.ui.TextInput = discord.ui.TextInput(label="Jellyfin username", placeholder="exact username")
+class AdminPortalRequestView(_PortalRequestView):
+    """Admin has no fixed target account, so approval is a dropdown of
+    current Jellyfin users (fetched once, at broadcast time) rather than a
+    modal text field — Discord modals can't hold a select menu, only text
+    inputs. "Not this device" is a hard removal (Deny) here, not a release
+    back to Pending, since an admin's "no" is a moderation decision rather
+    than one user passing on a request that might still be someone else's.
+    """
 
-    def __init__(self, jellyfin: JellyfinAdminClient, request_id: str, view: "AdminPortalRequestView"):
+    def __init__(self, jellyfin: JellyfinAdminClient, request_id: str, users: list[dict[str, Any]]):
         super().__init__()
         self.jellyfin = jellyfin
         self.request_id = request_id
-        self.view = view
+        self.user_lookup = {u["Id"]: u.get("Name", "?") for u in users}
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
+        select = discord.ui.Select(
+            placeholder="Approve for...",
+            options=[discord.SelectOption(label=u.get("Name", "?")[:100], value=u["Id"]) for u in users[:25]],
+            row=0,
+        )
+        select.callback = self._on_approve_select
+        self.add_item(select)
+
+    async def _on_approve_select(self, interaction: discord.Interaction) -> None:
+        user_id = interaction.data["values"][0]  # type: ignore[index]
+        username = self.user_lookup.get(user_id, "?")
         await interaction.response.defer(ephemeral=True)
         try:
-            user = await asyncio.to_thread(self.jellyfin.find_user, self.jellyfin_username.value)
-            if user is None:
-                await interaction.followup.send(f"No Jellyfin user named `{self.jellyfin_username.value}`.", ephemeral=True)
-                return
-            await asyncio.to_thread(self.jellyfin.select, self.request_id, user["Id"])
-            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, user["Id"], True, False)
+            await asyncio.to_thread(self.jellyfin.select, self.request_id, user_id)
+            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, user_id, True, False)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
-        await interaction.followup.send(f"Approved. Signed the device in as **{user['Name']}**.", ephemeral=True)
-        await self.view._finish(f"Approved by {interaction.user.mention} — signed in as **{user['Name']}**.")
+        await interaction.followup.send(f"Approved. Signed the device in as **{username}**.", ephemeral=True)
+        await self._finish(f"Approved by {interaction.user.mention} — signed in as **{username}**.")
 
-
-class AdminPortalRequestView(_PortalRequestView):
-    def __init__(self, jellyfin: JellyfinAdminClient, request_id: str, requesting_ip: str | None):
-        super().__init__()
-        self.jellyfin = jellyfin
-        self.request_id = request_id
-        self.requesting_ip = requesting_ip
-
-    @discord.ui.button(label="Approve for...", style=discord.ButtonStyle.success)
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(AdminApproveModal(self.jellyfin, self.request_id, self))
-
-    @discord.ui.button(label="Show requesting IP", style=discord.ButtonStyle.secondary)
-    async def show_ip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not is_owner(interaction):
-            await interaction.response.send_message("Only the server owner can view this.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"Requesting IP: {self.requesting_ip or 'Unknown'}", ephemeral=True)
-
-    @discord.ui.button(label="Not this device", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Not this device", style=discord.ButtonStyle.danger, row=1)
     async def not_mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         actor_id = str(uuid.uuid4())
         try:
             await asyncio.to_thread(self.jellyfin.select, self.request_id, actor_id)
-            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, actor_id, False, False)
+            await asyncio.to_thread(self.jellyfin.deny, self.request_id, actor_id)
         except Exception as exc:
-            await interaction.followup.send(f"Couldn't release that device: {exc}", ephemeral=True)
+            await interaction.followup.send(f"Couldn't deny that request: {exc}", ephemeral=True)
             return
-        await interaction.followup.send("Released back to the queue.", ephemeral=True)
-        await self._finish(f"Marked \"not this device\" by {interaction.user.mention}.")
+        await interaction.followup.send("Denied — removed from the queue.", ephemeral=True)
+        await self._finish(f"Denied by {interaction.user.mention} — removed from the queue.")
 
 
 class UserQuickConnectModal(discord.ui.Modal, title="Enter Quick Connect Code"):
@@ -479,6 +470,12 @@ class SignOnBot(discord.Client):
 
         cfg = self.store.snapshot()
         admin_channel_id = cfg["discord"].get("admin_channel_id")
+        admin_users: list[dict[str, Any]] = []
+        if admin_channel_id:
+            try:
+                admin_users = await asyncio.to_thread(self.jellyfin.users)
+            except Exception:
+                admin_users = []
 
         for entry in queue:
             if entry["Id"] not in new_ids:
@@ -503,8 +500,8 @@ class SignOnBot(discord.Client):
             if admin_channel_id:
                 channel = self.get_channel(int(admin_channel_id))
                 if channel is not None:
-                    admin_text = f"A device is waiting to sign in:\n\n{format_portal_telemetry(entry)}"
-                    admin_view = AdminPortalRequestView(self.jellyfin, entry["Id"], entry.get("RequestingIpAddress"))
+                    admin_text = f"A device is waiting to sign in:\n\n{format_portal_telemetry(entry, include_ip=True)}"
+                    admin_view = AdminPortalRequestView(self.jellyfin, entry["Id"], admin_users)
                     try:
                         admin_view.message = await channel.send(admin_text, view=admin_view)
                     except discord.Forbidden:
