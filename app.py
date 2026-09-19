@@ -7,7 +7,6 @@ import shutil
 import sqlite3
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -23,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 LOG = logging.getLogger("jellyfin-progress-sync")
 TICKS_PER_SECOND = 10_000_000
+USER_DATA_TABLE = "UserData"
 
 
 def utc_now() -> str:
@@ -112,8 +112,14 @@ class JellyfinClient:
 
 
 def normalize_columns(cols: list[tuple[Any, ...]]) -> dict[str, str]:
+    # Jellyfin's UserData table dropped its old single "Key" column for a
+    # composite (ItemId, UserId, CustomDataKey) primary key. CustomDataKey is
+    # what the API still exposes as UserData.Key (UserDataManager.cs maps
+    # CustomDataKey <-> dto.Key directly), so it keeps this tool's logical
+    # "key" name; ItemId is new and required for inserts.
     wanted = {
-        "key": "key",
+        "customdatakey": "key",
+        "itemid": "itemId",
         "userid": "userId",
         "rating": "rating",
         "played": "played",
@@ -146,10 +152,10 @@ class UserDataDb:
 
     def validate(self) -> dict[str, str]:
         with self.connect() as conn:
-            cols = normalize_columns(conn.execute("PRAGMA table_info(UserDatas)").fetchall())
-        missing = {"key", "userId", "played", "playCount", "playbackPositionTicks", "lastPlayedDate"} - set(cols)
+            cols = normalize_columns(conn.execute(f"PRAGMA table_info({USER_DATA_TABLE})").fetchall())
+        missing = {"itemId", "key", "userId", "played", "playCount", "playbackPositionTicks", "lastPlayedDate"} - set(cols)
         if missing:
-            raise RuntimeError(f"UserDatas table missing required columns: {', '.join(sorted(missing))}")
+            raise RuntimeError(f"{USER_DATA_TABLE} table missing required columns: {', '.join(sorted(missing))}")
         return cols
 
     def backup(self) -> str | None:
@@ -165,7 +171,7 @@ class UserDataDb:
         q_users = ",".join("?" for _ in users)
         q_keys = ",".join("?" for _ in keys)
         sql = f"""
-            SELECT * FROM UserDatas
+            SELECT * FROM {USER_DATA_TABLE}
             WHERE {cols['userId']} IN ({q_users})
               AND {cols['key']} IN ({q_keys})
         """
@@ -173,49 +179,43 @@ class UserDataDb:
             rows = conn.execute(sql, [*users, *keys]).fetchall()
         return {(str(row[cols["userId"]]), str(row[cols["key"]])): row for row in rows}
 
-    def upsert_progress(self, cols: dict[str, str], user_id: str, item_key: str, source: dict[str, Any]) -> None:
+    def upsert_progress(self, cols: dict[str, str], user_id: str, item_id: str, item_key: str, source: dict[str, Any]) -> None:
         now = utc_now()
         played = int(bool(source["played"]))
         play_count = max(1, int(source.get("playCount") or 0)) if played else int(source.get("playCount") or 0)
         ticks = 0 if played else int(source.get("playbackPositionTicks") or 0)
         last_played = source.get("lastPlayedDate") or now
-        row_id = uuid.uuid4().hex
 
         with self.connect() as conn:
             existing = conn.execute(
-                f"SELECT rowid FROM UserDatas WHERE {cols['userId']} = ? AND {cols['key']} = ?",
+                f"SELECT 1 FROM {USER_DATA_TABLE} WHERE {cols['userId']} = ? AND {cols['key']} = ?",
                 (user_id, item_key),
             ).fetchone()
             if existing:
                 conn.execute(
                     f"""
-                    UPDATE UserDatas
+                    UPDATE {USER_DATA_TABLE}
                     SET {cols['played']} = ?,
                         {cols['playCount']} = ?,
                         {cols['playbackPositionTicks']} = ?,
                         {cols['lastPlayedDate']} = ?
-                    WHERE rowid = ?
+                    WHERE {cols['userId']} = ? AND {cols['key']} = ?
                     """,
-                    (played, play_count, ticks, last_played, existing["rowid"]),
+                    (played, play_count, ticks, last_played, user_id, item_key),
                 )
             else:
-                names = [cols["key"], cols["userId"], cols["played"], cols["playCount"], cols["playbackPositionTicks"], cols["lastPlayedDate"]]
-                values = [item_key, user_id, played, play_count, ticks, last_played]
+                names = [cols["itemId"], cols["key"], cols["userId"], cols["played"], cols["playCount"], cols["playbackPositionTicks"], cols["lastPlayedDate"]]
+                values = [item_id, item_key, user_id, played, play_count, ticks, last_played]
                 if "rating" in cols:
                     names.append(cols["rating"])
                     values.append(None)
                 if "isFavorite" in cols:
                     names.append(cols["isFavorite"])
                     values.append(0)
-                if "id" in [n.lower() for n in cols.values()]:
-                    pass
-                try:
-                    conn.execute(
-                        f"INSERT INTO UserDatas ({', '.join(names)}) VALUES ({', '.join('?' for _ in values)})",
-                        values,
-                    )
-                except sqlite3.IntegrityError:
-                    raise
+                conn.execute(
+                    f"INSERT INTO {USER_DATA_TABLE} ({', '.join(names)}) VALUES ({', '.join('?' for _ in values)})",
+                    values,
+                )
             conn.commit()
 
 
@@ -299,7 +299,7 @@ class SyncEngine:
                         if not backup_done:
                             backup_path = db.backup()
                             backup_done = True
-                        db.upsert_progress(cols, user_id, best_key, best)
+                        db.upsert_progress(cols, user_id, best_ep.get("Id"), best_key, best)
                         changed.append({
                             "group": group.get("name", "Unnamed group"),
                             "seriesId": series_id,
