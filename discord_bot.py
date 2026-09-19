@@ -233,7 +233,10 @@ class QueuePickerView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         request_id = interaction.data["values"][0]  # type: ignore[index]
-        device_name = (self.bot.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
+        entry = self.bot.portal_entries.get(request_id) or {}
+        device_name = entry.get("DeviceName") or "a device"
+        device_ip = entry.get("RequestingIpAddress") or "unknown IP"
+        device_domain = entry.get("ConnectionDomain") or "unknown domain"
         await interaction.response.defer(ephemeral=True)
         try:
             await asyncio.to_thread(self.bot.jellyfin.select, request_id, self.target_user_id)
@@ -242,7 +245,7 @@ class QueuePickerView(discord.ui.View):
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed in as **{self.target_username}**.", ephemeral=True)
-        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{self.target_username}**.")
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** ({device_ip}, {device_domain}) to sign in as **{self.target_username}**.")
         await self.bot.cleanup_portal_messages(request_id)
         self.stop()
 
@@ -265,6 +268,12 @@ class _PortalRequestView(discord.ui.View):
     def _device_name(self) -> str:
         return (self.bot.portal_entries.get(self.request_id) or {}).get("DeviceName") or "a device"
 
+    def _device_ip(self) -> str:
+        return (self.bot.portal_entries.get(self.request_id) or {}).get("RequestingIpAddress") or "unknown IP"
+
+    def _device_domain(self) -> str:
+        return (self.bot.portal_entries.get(self.request_id) or {}).get("ConnectionDomain") or "unknown domain"
+
 
 class UserPortalRequestView(_PortalRequestView):
     def __init__(self, bot: "SignOnBot", request_id: str, jellyfin_user_id: str, jellyfin_username: str):
@@ -276,6 +285,8 @@ class UserPortalRequestView(_PortalRequestView):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         device_name = self._device_name()
+        device_ip = self._device_ip()
+        device_domain = self._device_domain()
         try:
             await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, self.jellyfin_user_id)
             await asyncio.to_thread(self.bot.jellyfin.confirm, self.request_id, self.jellyfin_user_id, True, False)
@@ -283,13 +294,15 @@ class UserPortalRequestView(_PortalRequestView):
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed in as **{self.jellyfin_username}**.", ephemeral=True)
-        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{self.jellyfin_username}**.")
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** ({device_ip}, {device_domain}) to sign in as **{self.jellyfin_username}**.")
         await self.bot.cleanup_portal_messages(self.request_id)
 
     @discord.ui.button(label="Not this device", style=discord.ButtonStyle.secondary)
     async def not_mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         device_name = self._device_name()
+        device_ip = self._device_ip()
+        device_domain = self._device_domain()
         try:
             await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, self.jellyfin_user_id)
             await asyncio.to_thread(self.bot.jellyfin.confirm, self.request_id, self.jellyfin_user_id, False, False)
@@ -299,7 +312,7 @@ class UserPortalRequestView(_PortalRequestView):
         await interaction.followup.send("Released back to the queue for someone else.", ephemeral=True)
         # Deliberately not cleaned up — Confirm(false) only releases the selection,
         # the request is still genuinely Pending and other channels should keep it.
-        await self.bot.post_log(f"{interaction.user.mention} marked **{device_name}** \"not this device\" — still pending for others.")
+        await self.bot.post_log(f"{interaction.user.mention} marked **{device_name}** ({device_ip}, {device_domain}) \"not this device\" — still pending for others.")
 
 
 class AdminPortalRequestView(_PortalRequestView):
@@ -327,6 +340,8 @@ class AdminPortalRequestView(_PortalRequestView):
         user_id = interaction.data["values"][0]  # type: ignore[index]
         username = self.user_lookup.get(user_id, "?")
         device_name = self._device_name()
+        device_ip = self._device_ip()
+        device_domain = self._device_domain()
         await interaction.response.defer(ephemeral=True)
         try:
             await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, user_id)
@@ -335,13 +350,15 @@ class AdminPortalRequestView(_PortalRequestView):
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed the device in as **{username}**.", ephemeral=True)
-        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{username}** (admin).")
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** ({device_ip}, {device_domain}) to sign in as **{username}** (admin).")
         await self.bot.cleanup_portal_messages(self.request_id)
 
     @discord.ui.button(label="Not this device", style=discord.ButtonStyle.danger, row=1)
     async def not_mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         device_name = self._device_name()
+        device_ip = self._device_ip()
+        device_domain = self._device_domain()
         actor_id = str(uuid.uuid4())
         try:
             await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, actor_id)
@@ -350,7 +367,7 @@ class AdminPortalRequestView(_PortalRequestView):
             await interaction.followup.send(f"Couldn't deny that request: {exc}", ephemeral=True)
             return
         await interaction.followup.send("Denied — removed from the queue.", ephemeral=True)
-        await self.bot.post_log(f"{interaction.user.mention} denied **{device_name}** (admin) — removed from the queue.")
+        await self.bot.post_log(f"{interaction.user.mention} denied **{device_name}** ({device_ip}, {device_domain}) (admin) — removed from the queue.")
         await self.bot.cleanup_portal_messages(self.request_id)
 
 
@@ -376,37 +393,72 @@ class UserQuickConnectModal(discord.ui.Modal, title="Enter Quick Connect Code"):
             await interaction.followup.send("That code wasn't accepted. It may be wrong or expired.", ephemeral=True)
 
 
-class AdminQuickConnectModal(discord.ui.Modal, title="Admin: Enter Quick Connect Code"):
-    jellyfin_username: discord.ui.TextInput = discord.ui.TextInput(label="Jellyfin username", placeholder="exact username")
-    code: discord.ui.TextInput = discord.ui.TextInput(label="6-digit code", placeholder="123456", min_length=6, max_length=6)
+class AdminQuickConnectUserPickerView(discord.ui.View):
+    """Second step of the admin Quick Connect flow: the code is already
+    known, this just picks which account to authorize it for — a dropdown
+    of current Jellyfin users, not a typed name, same reasoning as
+    AdminPortalRequestView's Approve dropdown.
+    """
 
-    def __init__(self, jellyfin: JellyfinAdminClient):
-        super().__init__()
-        self.jellyfin = jellyfin
+    def __init__(self, bot: "SignOnBot", code: str, users: list[dict[str, Any]]):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.code = code
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
+        self.user_lookup = {u["Id"]: u.get("Name", "?") for u in users}
+        select = discord.ui.Select(
+            placeholder="Sign this code in as...",
+            options=[discord.SelectOption(label=u.get("Name", "?")[:100], value=u["Id"]) for u in users[:25]],
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        user_id = interaction.data["values"][0]  # type: ignore[index]
+        username = self.user_lookup.get(user_id, "?")
         await interaction.response.defer(ephemeral=True)
         try:
-            user = await asyncio.to_thread(self.jellyfin.find_user, self.jellyfin_username.value)
-            if user is None:
-                await interaction.followup.send(f"No Jellyfin user named `{self.jellyfin_username.value}`.", ephemeral=True)
-                return
-            ok = await asyncio.to_thread(self.jellyfin.quick_connect_authorize, self.code.value.strip(), user["Id"])
+            ok = await asyncio.to_thread(self.bot.jellyfin.quick_connect_authorize, self.code, user_id)
         except Exception as exc:
             await interaction.followup.send(f"Jellyfin rejected that: {exc}", ephemeral=True)
             return
         if ok:
-            await interaction.followup.send(f"Signed the device in as **{user['Name']}**.", ephemeral=True)
+            await interaction.followup.send(f"Signed the device in as **{username}**.", ephemeral=True)
         else:
             await interaction.followup.send("That code wasn't accepted.", ephemeral=True)
+        self.stop()
+
+
+class AdminQuickConnectCodeModal(discord.ui.Modal, title="Admin: Enter Quick Connect Code"):
+    code: discord.ui.TextInput = discord.ui.TextInput(label="6-digit code", placeholder="123456", min_length=6, max_length=6)
+
+    def __init__(self, bot: "SignOnBot"):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            users = await asyncio.to_thread(self.bot.jellyfin.users)
+        except Exception as exc:
+            await interaction.followup.send(f"Couldn't reach Jellyfin: {exc}", ephemeral=True)
+            return
+        if not users:
+            await interaction.followup.send("No Jellyfin users found.", ephemeral=True)
+            return
+        view = AdminQuickConnectUserPickerView(self.bot, self.code.value.strip(), users)
+        await interaction.followup.send("Sign this code in as:", view=view, ephemeral=True)
 
 
 class QuickConnectButtonView(discord.ui.View):
     """A standing button, persistent across bot restarts (fixed custom_id + timeout=None).
 
-    Which modal it opens depends on the channel it's clicked in: the admin
-    channel gets a username field too, any linked user channel is locked to
-    that channel's own account.
+    Which modal it opens depends on the channel it's clicked in. A linked
+    user channel is locked to that channel's own account. The admin channel
+    only asks for the code here — picking who it's for is a second-step
+    dropdown (AdminQuickConnectUserPickerView), not a field in this same
+    modal, since a modal can't hold a select menu and typing a name invites
+    typos on an action that instantly signs someone in.
     """
 
     def __init__(self, bot: "SignOnBot"):
@@ -418,7 +470,7 @@ class QuickConnectButtonView(discord.ui.View):
         cfg = self.bot.store.snapshot()
         admin_channel_id = cfg["discord"].get("admin_channel_id")
         if admin_channel_id and interaction.channel_id == int(admin_channel_id):
-            await interaction.response.send_modal(AdminQuickConnectModal(self.bot.jellyfin))
+            await interaction.response.send_modal(AdminQuickConnectCodeModal(self.bot))
             return
         mapping = find_mapping_by_channel(self.bot.store, interaction.channel_id)
         if mapping is None:
@@ -547,8 +599,11 @@ class SignOnBot(discord.Client):
         for request_id in resolved_ids:
             if request_id not in self.portal_messages:
                 continue  # already cleaned up by whichever button actually resolved it
-            device_name = (self.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
-            await self.post_log(f"Request for **{device_name}** is no longer pending (expired, canceled, or connection lost).")
+            entry = self.portal_entries.get(request_id) or {}
+            device_name = entry.get("DeviceName") or "a device"
+            device_ip = entry.get("RequestingIpAddress") or "unknown IP"
+            device_domain = entry.get("ConnectionDomain") or "unknown domain"
+            await self.post_log(f"Request for **{device_name}** ({device_ip}, {device_domain}) is no longer pending (expired, canceled, or connection lost).")
             await self.cleanup_portal_messages(request_id)
 
         if not new_ids:
@@ -924,7 +979,10 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         # fine here since the request is removed from the queue immediately after
         # and no account ever gets signed in.
         actor_id = str(uuid.uuid4())
-        device_name = (bot.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
+        entry = bot.portal_entries.get(request_id) or {}
+        device_name = entry.get("DeviceName") or "a device"
+        device_ip = entry.get("RequestingIpAddress") or "unknown IP"
+        device_domain = entry.get("ConnectionDomain") or "unknown domain"
         try:
             await asyncio.to_thread(bot.jellyfin.select, request_id, actor_id)
             await asyncio.to_thread(bot.jellyfin.deny, request_id, actor_id)
@@ -932,7 +990,7 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
             await interaction.followup.send(f"Couldn't deny that request: {exc}", ephemeral=True)
             return
         await interaction.followup.send("Denied.", ephemeral=True)
-        await bot.post_log(f"{interaction.user.mention} denied **{device_name}** (admin) — removed from the queue.")
+        await bot.post_log(f"{interaction.user.mention} denied **{device_name}** ({device_ip}, {device_domain}) (admin) — removed from the queue.")
         await bot.cleanup_portal_messages(request_id)
 
     @tree.error
