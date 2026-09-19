@@ -3,6 +3,8 @@
     "bot_token": "put-a-discord-bot-token-here",
     "guild_id": "put-your-discord-server-id-here",
     "admin_channel_id": null,
+    "admin_control_message_id": null,
+    "log_channel_id": null,
     "category_id": null
   },
   "jellyfin": {

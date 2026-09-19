@@ -310,8 +310,10 @@ Jellyfin server, only the Quick Connect commands will work.
    progress sync UI, and the security monitor.
 5. In Discord, as the **server owner**, run `/lockdown-server` once to hide
    every channel from `@everyone` by default, run `/set-admin-channel`
-   inside whichever channel should be the admin control room, then run
-   `/link-user` once per person to create their private sign-on channel.
+   inside whichever channel should be the admin control room, optionally
+   `/set-log-channel` inside a separate admin-only channel for an activity
+   log, then run `/link-user` once per person to create their private
+   sign-on channel.
 
 ### Commands
 
@@ -322,7 +324,13 @@ Owner-only, any channel:
   account.
 - `/unlink-user member:@someone [delete_channel]` — removes the link;
   optionally deletes the channel.
-- `/set-admin-channel` — marks the current channel as the admin channel.
+- `/set-admin-channel` — marks the current channel as the admin channel. The
+  bot also checks once a minute that its Quick Connect button message is
+  still there and re-posts it if it's missing or predates this feature, so
+  you don't need to re-run this just to backfill the button.
+- `/set-log-channel` — marks the current channel as an admin-only activity
+  log: who approved or denied a device, for which account, and requests
+  that expired or were canceled with no response.
 - `/lockdown-server` — denies `@everyone` the ability to view channels or
   create invites, server-wide, and forces the same on every existing
   channel. Run this once, before linking anyone.
@@ -339,3 +347,19 @@ Admin channel only, owner-only:
 - `/admin-queue jellyfin_username:name` — pick a waiting device to sign into
   any account.
 - `/admin-deny request_id:...` — remove a device from the queue.
+
+### Quick Sign-On queue broadcasts
+
+Whenever a device enters the Quick Sign-On queue, the bot posts it — with
+the same telemetry fields as the actual web portal (device, client,
+platform, connection domain, entered/expires times, and, admin channel
+only, the requesting IP) — into every linked user's channel and the admin
+channel at once, each with its own **Approve** / **Not this device**
+buttons (admin's Approve is a dropdown of accounts instead of typing one
+in). Once the request is genuinely resolved — approved from any channel, or
+hard-denied from the admin channel — every other channel's copy of that
+same prompt is deleted, not just disabled, so people don't end up staring
+at a stale button. A user's own "Not this device" only releases it back to
+the shared queue for someone else to take, so it's left alone rather than
+deleted. A request that expires, or that the requesting device itself
+cancels, is cleaned up the same way.

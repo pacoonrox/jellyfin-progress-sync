@@ -40,6 +40,8 @@ class BotConfigStore:
         data["discord"].setdefault("bot_token", "")
         data["discord"].setdefault("guild_id", None)
         data["discord"].setdefault("admin_channel_id", None)
+        data["discord"].setdefault("admin_control_message_id", None)
+        data["discord"].setdefault("log_channel_id", None)
         data["discord"].setdefault("category_id", None)
         data.setdefault("jellyfin", {})
         data["jellyfin"].setdefault("base_url", "http://127.0.0.1:8096")
@@ -207,13 +209,13 @@ async def create_user_channel(
 class QueuePickerView(discord.ui.View):
     def __init__(
         self,
-        jellyfin: JellyfinAdminClient,
+        bot: "SignOnBot",
         queue: list[dict[str, Any]],
         target_user_id: str,
         target_username: str,
     ):
         super().__init__(timeout=120)
-        self.jellyfin = jellyfin
+        self.bot = bot
         self.target_user_id = target_user_id
         self.target_username = target_username
 
@@ -231,81 +233,73 @@ class QueuePickerView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         request_id = interaction.data["values"][0]  # type: ignore[index]
+        device_name = (self.bot.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
         await interaction.response.defer(ephemeral=True)
         try:
-            await asyncio.to_thread(self.jellyfin.select, request_id, self.target_user_id)
-            await asyncio.to_thread(self.jellyfin.confirm, request_id, self.target_user_id, True, False)
+            await asyncio.to_thread(self.bot.jellyfin.select, request_id, self.target_user_id)
+            await asyncio.to_thread(self.bot.jellyfin.confirm, request_id, self.target_user_id, True, False)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed in as **{self.target_username}**.", ephemeral=True)
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{self.target_username}**.")
+        await self.bot.cleanup_portal_messages(request_id)
         self.stop()
 
 
 class _PortalRequestView(discord.ui.View):
-    """Shared button-disabling/message-editing behavior for the two portal
-    broadcast views below. Each instance is scoped to one specific device
-    request and posted once, so a plain (non-persistent) timeout matching
-    the request's own 5-minute server-side expiry is enough — it doesn't
-    need to survive a bot restart the way the standing Quick Connect button
-    does.
+    """Each instance is scoped to one specific device request and posted
+    once. Resolution (approve, or a hard deny) is handled by the bot's
+    cleanup_portal_messages, which removes every broadcast copy of this
+    request across every channel — not just this one — so a plain
+    (non-persistent) timeout matching the request's own 5-minute
+    server-side expiry is enough; it doesn't need to survive a bot restart
+    the way the standing Quick Connect button does.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bot: "SignOnBot", request_id: str) -> None:
         super().__init__(timeout=300)
-        self.message: discord.Message | None = None
+        self.bot = bot
+        self.request_id = request_id
 
-    async def _finish(self, note: str) -> None:
-        self.stop()
-        for child in self.children:
-            child.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(content=f"{self.message.content}\n\n{note}", view=self)
-            except discord.HTTPException:
-                pass
-
-    async def on_timeout(self) -> None:
-        for child in self.children:
-            child.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(content=f"{self.message.content}\n\n_Expired._", view=self)
-            except discord.HTTPException:
-                pass
+    def _device_name(self) -> str:
+        return (self.bot.portal_entries.get(self.request_id) or {}).get("DeviceName") or "a device"
 
 
 class UserPortalRequestView(_PortalRequestView):
-    def __init__(self, jellyfin: JellyfinAdminClient, request_id: str, jellyfin_user_id: str, jellyfin_username: str):
-        super().__init__()
-        self.jellyfin = jellyfin
-        self.request_id = request_id
+    def __init__(self, bot: "SignOnBot", request_id: str, jellyfin_user_id: str, jellyfin_username: str):
+        super().__init__(bot, request_id)
         self.jellyfin_user_id = jellyfin_user_id
         self.jellyfin_username = jellyfin_username
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
+        device_name = self._device_name()
         try:
-            await asyncio.to_thread(self.jellyfin.select, self.request_id, self.jellyfin_user_id)
-            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, self.jellyfin_user_id, True, False)
+            await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, self.jellyfin_user_id)
+            await asyncio.to_thread(self.bot.jellyfin.confirm, self.request_id, self.jellyfin_user_id, True, False)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed in as **{self.jellyfin_username}**.", ephemeral=True)
-        await self._finish(f"Approved by {interaction.user.mention} — signed in as **{self.jellyfin_username}**.")
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{self.jellyfin_username}**.")
+        await self.bot.cleanup_portal_messages(self.request_id)
 
     @discord.ui.button(label="Not this device", style=discord.ButtonStyle.secondary)
     async def not_mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
+        device_name = self._device_name()
         try:
-            await asyncio.to_thread(self.jellyfin.select, self.request_id, self.jellyfin_user_id)
-            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, self.jellyfin_user_id, False, False)
+            await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, self.jellyfin_user_id)
+            await asyncio.to_thread(self.bot.jellyfin.confirm, self.request_id, self.jellyfin_user_id, False, False)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't release that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send("Released back to the queue for someone else.", ephemeral=True)
-        await self._finish(f"Marked \"not this device\" by {interaction.user.mention}.")
+        # Deliberately not cleaned up — Confirm(false) only releases the selection,
+        # the request is still genuinely Pending and other channels should keep it.
+        await self.bot.post_log(f"{interaction.user.mention} marked **{device_name}** \"not this device\" — still pending for others.")
 
 
 class AdminPortalRequestView(_PortalRequestView):
@@ -317,10 +311,8 @@ class AdminPortalRequestView(_PortalRequestView):
     than one user passing on a request that might still be someone else's.
     """
 
-    def __init__(self, jellyfin: JellyfinAdminClient, request_id: str, users: list[dict[str, Any]]):
-        super().__init__()
-        self.jellyfin = jellyfin
-        self.request_id = request_id
+    def __init__(self, bot: "SignOnBot", request_id: str, users: list[dict[str, Any]]):
+        super().__init__(bot, request_id)
         self.user_lookup = {u["Id"]: u.get("Name", "?") for u in users}
 
         select = discord.ui.Select(
@@ -334,28 +326,32 @@ class AdminPortalRequestView(_PortalRequestView):
     async def _on_approve_select(self, interaction: discord.Interaction) -> None:
         user_id = interaction.data["values"][0]  # type: ignore[index]
         username = self.user_lookup.get(user_id, "?")
+        device_name = self._device_name()
         await interaction.response.defer(ephemeral=True)
         try:
-            await asyncio.to_thread(self.jellyfin.select, self.request_id, user_id)
-            await asyncio.to_thread(self.jellyfin.confirm, self.request_id, user_id, True, False)
+            await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, user_id)
+            await asyncio.to_thread(self.bot.jellyfin.confirm, self.request_id, user_id, True, False)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't approve that device: {exc}", ephemeral=True)
             return
         await interaction.followup.send(f"Approved. Signed the device in as **{username}**.", ephemeral=True)
-        await self._finish(f"Approved by {interaction.user.mention} — signed in as **{username}**.")
+        await self.bot.post_log(f"{interaction.user.mention} approved **{device_name}** to sign in as **{username}** (admin).")
+        await self.bot.cleanup_portal_messages(self.request_id)
 
     @discord.ui.button(label="Not this device", style=discord.ButtonStyle.danger, row=1)
     async def not_mine(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
+        device_name = self._device_name()
         actor_id = str(uuid.uuid4())
         try:
-            await asyncio.to_thread(self.jellyfin.select, self.request_id, actor_id)
-            await asyncio.to_thread(self.jellyfin.deny, self.request_id, actor_id)
+            await asyncio.to_thread(self.bot.jellyfin.select, self.request_id, actor_id)
+            await asyncio.to_thread(self.bot.jellyfin.deny, self.request_id, actor_id)
         except Exception as exc:
             await interaction.followup.send(f"Couldn't deny that request: {exc}", ephemeral=True)
             return
         await interaction.followup.send("Denied — removed from the queue.", ephemeral=True)
-        await self._finish(f"Denied by {interaction.user.mention} — removed from the queue.")
+        await self.bot.post_log(f"{interaction.user.mention} denied **{device_name}** (admin) — removed from the queue.")
+        await self.bot.cleanup_portal_messages(self.request_id)
 
 
 class UserQuickConnectModal(discord.ui.Modal, title="Enter Quick Connect Code"):
@@ -433,6 +429,13 @@ class QuickConnectButtonView(discord.ui.View):
         )
 
 
+ADMIN_CONTROL_MESSAGE = (
+    "This is the admin sign-on channel. Use the button below (or `/admin-signin`) for a device showing "
+    "a Quick Connect code, or `/admin-queue` to approve a device waiting in the Quick Sign-On queue — "
+    "both let you pick any Jellyfin account."
+)
+
+
 class SignOnBot(discord.Client):
     def __init__(self, store: BotConfigStore):
         super().__init__(intents=discord.Intents.default())
@@ -441,6 +444,65 @@ class SignOnBot(discord.Client):
         cfg = store.snapshot()
         self.jellyfin = JellyfinAdminClient(cfg["jellyfin"]["base_url"], cfg["jellyfin"]["api_key"])
         self.announced_requests: set[str] = set()
+        # request_id -> [(channel_id, message_id), ...] for every broadcast copy of that
+        # request, so a real resolution (approve, or a hard deny) can remove it everywhere
+        # at once instead of leaving stale prompts in channels that didn't act on it.
+        self.portal_messages: dict[str, list[tuple[int, int]]] = {}
+        self.portal_entries: dict[str, dict[str, Any]] = {}
+
+    async def post_log(self, message: str) -> None:
+        cfg = self.store.snapshot()
+        log_channel_id = cfg["discord"].get("log_channel_id")
+        if not log_channel_id:
+            return
+        channel = self.get_channel(int(log_channel_id))
+        if channel is None:
+            return
+        try:
+            await channel.send(message)
+        except discord.HTTPException:
+            LOG.warning("Couldn't post to the log channel %s", log_channel_id)
+
+    async def cleanup_portal_messages(self, request_id: str) -> None:
+        tracked = self.portal_messages.pop(request_id, [])
+        self.portal_entries.pop(request_id, None)
+        for channel_id, message_id in tracked:
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                LOG.warning("Couldn't delete a portal-queue message in channel %s", channel_id)
+
+    async def ensure_admin_control_message(self) -> None:
+        cfg = self.store.snapshot()
+        admin_channel_id = cfg["discord"].get("admin_channel_id")
+        if not admin_channel_id:
+            return
+        channel = self.get_channel(int(admin_channel_id))
+        if channel is None:
+            return
+        message_id = cfg["discord"].get("admin_control_message_id")
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                return
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                return
+        try:
+            message = await channel.send(ADMIN_CONTROL_MESSAGE, view=QuickConnectButtonView(self))
+        except discord.Forbidden:
+            LOG.warning("Missing permission to post the admin control message in channel %s", admin_channel_id)
+            return
+        cfg = self.store.snapshot()
+        cfg["discord"]["admin_control_message_id"] = str(message.id)
+        self.store.save(cfg)
 
     async def setup_hook(self) -> None:
         guild_id = self.store.snapshot()["discord"].get("guild_id")
@@ -452,9 +514,23 @@ class SignOnBot(discord.Client):
             await self.tree.sync()
         self.add_view(QuickConnectButtonView(self))
         self.watch_portal_queue.start()
+        self.ensure_admin_control_message_loop.start()
 
     async def on_ready(self) -> None:
         LOG.info("Logged in as %s", self.user)
+
+    @tasks.loop(minutes=10)
+    async def ensure_admin_control_message_loop(self) -> None:
+        await self.ensure_admin_control_message()
+
+    @ensure_admin_control_message_loop.before_loop
+    async def before_ensure_admin_control_message_loop(self) -> None:
+        await self.wait_until_ready()
+        # Check once immediately at startup instead of waiting for the first
+        # 10-minute tick — this is what makes the button retroactively appear
+        # in an admin channel that predates this feature, or reappear if the
+        # message gets deleted, without needing /set-admin-channel re-run.
+        await self.ensure_admin_control_message()
 
     @tasks.loop(seconds=5)
     async def watch_portal_queue(self) -> None:
@@ -463,8 +539,18 @@ class SignOnBot(discord.Client):
         except Exception:
             return
         current_ids = {entry["Id"] for entry in queue}
-        new_ids = current_ids - self.announced_requests
+        previous_ids = self.announced_requests
+        new_ids = current_ids - previous_ids
+        resolved_ids = previous_ids - current_ids
         self.announced_requests = current_ids
+
+        for request_id in resolved_ids:
+            if request_id not in self.portal_messages:
+                continue  # already cleaned up by whichever button actually resolved it
+            device_name = (self.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
+            await self.post_log(f"Request for **{device_name}** is no longer pending (expired, canceled, or connection lost).")
+            await self.cleanup_portal_messages(request_id)
+
         if not new_ids:
             return
 
@@ -480,6 +566,8 @@ class SignOnBot(discord.Client):
         for entry in queue:
             if entry["Id"] not in new_ids:
                 continue
+            self.portal_entries[entry["Id"]] = entry
+            tracked: list[tuple[int, int]] = []
 
             user_text = f"A device is waiting to sign in:\n\n{format_portal_telemetry(entry)}"
             for mapping in cfg["users"].values():
@@ -489,11 +577,12 @@ class SignOnBot(discord.Client):
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
                     continue
-                view = UserPortalRequestView(self.jellyfin, entry["Id"], mapping["jellyfin_user_id"], mapping["jellyfin_username"])
+                view = UserPortalRequestView(self, entry["Id"], mapping["jellyfin_user_id"], mapping["jellyfin_username"])
                 try:
-                    view.message = await channel.send(
+                    message = await channel.send(
                         f"{user_text}\n\nApprove into **{mapping['jellyfin_username']}**?", view=view
                     )
+                    tracked.append((message.channel.id, message.id))
                 except discord.Forbidden:
                     LOG.warning("Missing permission to post the portal-queue notice in channel %s", channel_id)
 
@@ -501,11 +590,14 @@ class SignOnBot(discord.Client):
                 channel = self.get_channel(int(admin_channel_id))
                 if channel is not None:
                     admin_text = f"A device is waiting to sign in:\n\n{format_portal_telemetry(entry, include_ip=True)}"
-                    admin_view = AdminPortalRequestView(self.jellyfin, entry["Id"], admin_users)
+                    admin_view = AdminPortalRequestView(self, entry["Id"], admin_users)
                     try:
-                        admin_view.message = await channel.send(admin_text, view=admin_view)
+                        message = await channel.send(admin_text, view=admin_view)
+                        tracked.append((message.channel.id, message.id))
                     except discord.Forbidden:
                         LOG.warning("Missing permission to post the portal-queue notice in the admin channel %s", admin_channel_id)
+
+            self.portal_messages[entry["Id"]] = tracked
 
     @watch_portal_queue.before_loop
     async def before_watch_portal_queue(self) -> None:
@@ -659,13 +751,42 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         cfg = store.snapshot()
         cfg["discord"]["admin_channel_id"] = str(channel.id)
         store.save(cfg)
-        await channel.send(
-            "This is the admin sign-on channel. Use the button below (or `/admin-signin`) for a device showing "
-            "a Quick Connect code, or `/admin-queue` to approve a device waiting in the Quick Sign-On queue — "
-            "both let you pick any Jellyfin account.",
-            view=QuickConnectButtonView(bot),
-        )
+        message = await channel.send(ADMIN_CONTROL_MESSAGE, view=QuickConnectButtonView(bot))
+        cfg = store.snapshot()
+        cfg["discord"]["admin_control_message_id"] = str(message.id)
+        store.save(cfg)
         await interaction.response.send_message(f"{channel.mention} is now the admin channel.", ephemeral=True)
+
+    @tree.command(name="set-log-channel", description="Mark the current channel as the admin-only sign-on activity log.")
+    @app_commands.guild_only()
+    async def set_log_channel(interaction: discord.Interaction) -> None:
+        if not await require_owner(interaction):
+            return
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Run this inside a text channel.", ephemeral=True)
+            return
+        try:
+            await channel.set_permissions(guild.default_role, view_channel=False)
+            await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"I don't have permission to manage {channel.mention}'s access — it likely has permission "
+                f"overwrites from before I was invited that don't grant me Manage Permissions here. "
+                f"Try a brand-new channel instead, or add me to this channel's permissions with Manage "
+                f"Roles/Manage Channels allowed.",
+                ephemeral=True,
+            )
+            return
+        cfg = store.snapshot()
+        cfg["discord"]["log_channel_id"] = str(channel.id)
+        store.save(cfg)
+        await channel.send(
+            "This channel logs sign-on activity: who approved or denied a device, for which account, "
+            "and requests that expired or were canceled with no response."
+        )
+        await interaction.response.send_message(f"{channel.mention} is now the activity log channel.", ephemeral=True)
 
     @tree.command(name="lockdown-server", description="Admin: hide every channel from @everyone by default until a member is linked.")
     @app_commands.guild_only()
@@ -743,7 +864,7 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         if not queue:
             await interaction.followup.send("No devices are waiting right now.", ephemeral=True)
             return
-        view = QueuePickerView(bot.jellyfin, queue, mapping["jellyfin_user_id"], mapping["jellyfin_username"])
+        view = QueuePickerView(bot, queue, mapping["jellyfin_user_id"], mapping["jellyfin_username"])
         await interaction.followup.send("Pick the device that's yours:", view=view, ephemeral=True)
 
     @tree.command(name="admin-signin", description="Admin: sign in a device to any Jellyfin user via a Quick Connect code.")
@@ -788,7 +909,7 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         if not queue:
             await interaction.followup.send("No devices are waiting right now.", ephemeral=True)
             return
-        view = QueuePickerView(bot.jellyfin, queue, user["Id"], user["Name"])
+        view = QueuePickerView(bot, queue, user["Id"], user["Name"])
         await interaction.followup.send(f"Pick the device to sign in as **{user['Name']}**:", view=view, ephemeral=True)
 
     @tree.command(name="admin-deny", description="Admin: deny a device waiting in the Quick Sign-On queue.")
@@ -803,6 +924,7 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
         # fine here since the request is removed from the queue immediately after
         # and no account ever gets signed in.
         actor_id = str(uuid.uuid4())
+        device_name = (bot.portal_entries.get(request_id) or {}).get("DeviceName") or "a device"
         try:
             await asyncio.to_thread(bot.jellyfin.select, request_id, actor_id)
             await asyncio.to_thread(bot.jellyfin.deny, request_id, actor_id)
@@ -810,6 +932,8 @@ def build_bot(store: BotConfigStore) -> SignOnBot:
             await interaction.followup.send(f"Couldn't deny that request: {exc}", ephemeral=True)
             return
         await interaction.followup.send("Denied.", ephemeral=True)
+        await bot.post_log(f"{interaction.user.mention} denied **{device_name}** (admin) — removed from the queue.")
+        await bot.cleanup_portal_messages(request_id)
 
     @tree.error
     async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
